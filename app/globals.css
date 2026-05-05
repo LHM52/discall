@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 디스코드 느낌의 얇은 다크 스크롤바 (채팅·목록 등에 .scrollbar-discord) */
+.scrollbar-discord {
+  scrollbar-width: thin;
+  scrollbar-color: #4b4d53 #1e1f22;
+}
+
+.scrollbar-discord::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.scrollbar-discord::-webkit-scrollbar-track {
+  margin: 4px 0;
+  background: #1e1f22;
+  border-radius: 8px;
+}
+
+.scrollbar-discord::-webkit-scrollbar-thumb {
+  background-color: #2b2d31;
+  border-radius: 8px;
+  border: 2px solid #1e1f22;
+  min-height: 40px;
+}
+
+.scrollbar-discord::-webkit-scrollbar-thumb:hover {
+  background-color: #4b4d53;
+}
+
+.scrollbar-discord::-webkit-scrollbar-thumb:active {
+  background-color: #6d6f78;
+}
