@@ -681,6 +681,19 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
 
           if (!from || from === myId.current) return;
 
+          // Ignore call-state updates from peers that were very recently
+          // marked as left. This prevents a race where a late broadcast
+          // (or out-of-order signal) re-adds a participant immediately
+          // after they've left, causing a ghost tile with no media.
+          const removedAt = recentlyRemovedRef.current[from];
+          if (removedAt && Date.now() - removedAt < 2000) {
+            console.debug(
+              "[call-state-update] ignoring recent update from:",
+              from,
+            );
+            return;
+          }
+
           setParticipants((prev) => {
             const existing = prev.find((p) => p.id === from);
             const nextParticipant: Participant = {
