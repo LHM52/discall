@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-import { defaultRtcConfiguration } from "@/lib/room/ice";
+import { defaultRtcConfiguration, hasCustomTurn } from "@/lib/room/ice";
 import {
   isPeerConnectionUsable,
   isSdpMlineOrderError,
@@ -58,6 +58,12 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
   const pendingIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>(
     {},
   );
+  const pendingPresenceSyncTimerRef = useRef<number | null>(null);
+  const pendingPresenceSyncPayloadRef = useRef<{
+    pList: Participant[];
+    mediaStates: Record<string, { cameraOn: boolean; screenSharing: boolean }>;
+  } | null>(null);
+  const consecutiveEmptySyncsRef = useRef(0);
   const pendingBroadcastsRef = useRef<BroadcastMessage[]>([]);
   const pendingPresenceUpdatesRef = useRef<Partial<PresenceTrack>[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -118,7 +124,14 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
         screenSharing: screenSharingRef.current,
         ...overrides,
       };
-      await channelRef.current.track(presence);
+      try {
+        console.debug("[updatePresence] tracking presence:", presence);
+        await channelRef.current.track(presence);
+        console.debug("[updatePresence] track ok for", presence.id);
+      } catch (err) {
+        console.error("[updatePresence] track failed", err, presence);
+        throw err;
+      }
     },
     [nickname],
   );
@@ -238,6 +251,15 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
       cleanupPeer(remoteId);
 
       pc = new RTCPeerConnection(defaultRtcConfiguration);
+      // Log ICE servers used by this peer to verify TURN presence in bundled config
+      try {
+        console.debug(
+          `[pc.create] ${remoteId} iceServers:`,
+          pc.getConfiguration().iceServers,
+        );
+      } catch (e) {
+        console.debug("[pc.create] unable to read iceServers", e);
+      }
       pcsRef.current.set(remoteId, pc);
 
       makingOfferRef.current[remoteId] = false;
@@ -271,9 +293,29 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
 
       const attachLocalTracks = async () => {
         if (!localStreamRef.current) return;
+
+        // Guard: ensure this pc is still the active one for remoteId
+        if (
+          pcsRef.current.get(remoteId) !== pc ||
+          pc.signalingState === "closed"
+        ) {
+          throw new Error("Peer connection closed before attaching tracks");
+        }
+
         const audioTrack = localStreamRef.current.getAudioTracks()[0];
         if (audioTrack) {
-          await audioTransceiver.sender.replaceTrack(audioTrack);
+          try {
+            if (
+              audioTransceiver?.sender &&
+              pcsRef.current.get(remoteId) === pc &&
+              pc.signalingState !== "closed"
+            ) {
+              await audioTransceiver.sender.replaceTrack(audioTrack);
+            }
+          } catch (err) {
+            console.warn("replaceTrack (audio) failed", err, remoteId);
+            throw err;
+          }
         }
 
         const videoTrack = screenSharingRef.current
@@ -281,11 +323,32 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
           : cameraOnRef.current
             ? localStreamRef.current.getVideoTracks()[0] || null
             : null;
-        await videoTransceiver.sender.replaceTrack(videoTrack);
+        try {
+          if (
+            videoTransceiver?.sender &&
+            pcsRef.current.get(remoteId) === pc &&
+            pc.signalingState !== "closed"
+          ) {
+            await videoTransceiver.sender.replaceTrack(videoTrack);
+          }
+        } catch (err) {
+          console.warn("replaceTrack (video) failed", err, remoteId);
+          throw err;
+        }
       };
 
       pc.onicecandidate = ({ candidate }) => {
         if (candidate) {
+          // detect whether candidate is a relay (TURN) or host/srflx
+          const isRelay = String(candidate.candidate || "").includes(
+            " typ relay",
+          );
+          console.debug(
+            "[pc.onicecandidate] to:",
+            remoteId,
+            isRelay ? "relay candidate" : "candidate",
+            candidate,
+          );
           void sendBroadcast({
             type: "broadcast",
             event: "signal",
@@ -382,6 +445,26 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
         }
       }
 
+      // 추가 디버그용 이벤트 핸들러: 연결 상태/ICE 상태 로깅
+      pc.onconnectionstatechange = () => {
+        console.debug(
+          `[pc.onconnectionstatechange] ${remoteId}:`,
+          pc?.connectionState,
+        );
+      };
+      pc.oniceconnectionstatechange = () => {
+        console.debug(
+          `[pc.oniceconnectionstatechange] ${remoteId}:`,
+          pc?.iceConnectionState,
+        );
+      };
+      pc.onsignalingstatechange = () => {
+        console.debug(
+          `[pc.onsignalingstatechange] ${remoteId}:`,
+          pc?.signalingState,
+        );
+      };
+
       if (
         pcsRef.current.get(remoteId) !== pc ||
         pc.signalingState === "closed"
@@ -456,6 +539,11 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
     let isMounted = true;
 
     const init = () => {
+      if (!hasCustomTurn) {
+        console.warn(
+          "[useRoomCall] NEXT_PUBLIC_TURN_URLS not set — external peers may fail to establish media. Set NEXT_PUBLIC_TURN_URLS/NEXT_PUBLIC_TURN_USERNAME/NEXT_PUBLIC_TURN_CREDENTIAL and redeploy.",
+        );
+      }
       const channel = supabase.channel(`room-${roomId}`, {
         config: { broadcast: { self: false }, presence: { key: myId.current } },
       });
@@ -632,6 +720,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
         .on("presence", { event: "sync" }, async () => {
           if (!isMounted) return;
           const state = channel.presenceState();
+          console.debug("[presence.sync] raw state:", state);
           const pList: Participant[] = [];
           const mediaStates: Record<
             string,
@@ -646,13 +735,14 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
               : null;
             if (p) {
               pList.push(p);
-              if (key !== myId.current) {
+              // Use participant id for comparisons and media-state mapping
+              if (p.id !== myId.current) {
                 if (p.status !== "calling") {
                   cleanupPeer(p.id);
                 }
 
                 if (isJoinedRef.current && p.status === "calling") {
-                  mediaStates[key] = {
+                  mediaStates[p.id] = {
                     cameraOn: Boolean(p.cameraOn),
                     screenSharing: Boolean(p.screenSharing),
                   };
@@ -678,8 +768,50 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
               }
             }
           }
-          setParticipants(pList);
-          setParticipantMediaStates((prev) => ({ ...prev, ...mediaStates }));
+
+          // Debounce presence.sync updates to avoid transient empty states.
+          pendingPresenceSyncPayloadRef.current = { pList, mediaStates };
+          if (pendingPresenceSyncTimerRef.current) {
+            clearTimeout(pendingPresenceSyncTimerRef.current);
+          }
+          // use longer delay when payload is empty to avoid flashing UI
+          const _delay = pList.length === 0 ? 1000 : 250;
+          // eslint-disable-next-line @typescript-eslint/no-confusing-void-expression
+          pendingPresenceSyncTimerRef.current = window.setTimeout(() => {
+            const payload = pendingPresenceSyncPayloadRef.current;
+            if (!payload) return;
+            console.warn(
+              "[presence.sync] setParticipants =>",
+              payload.pList.map((x) => x.id),
+            );
+
+            // If payload is empty, don't immediately clear participants.
+            // Only clear after seeing several consecutive empty syncs to avoid
+            // transient network/order glitches causing UI flicker.
+            if (payload.pList.length === 0) {
+              consecutiveEmptySyncsRef.current += 1;
+              const required = 3; // need 3 consecutive empties (~3s when using 1s delay)
+              console.warn(
+                `[presence.sync] empty payload (${consecutiveEmptySyncsRef.current}/${required}) - skipping clear`,
+              );
+              if (consecutiveEmptySyncsRef.current >= required) {
+                setParticipants([]);
+                setParticipantMediaStates((prev) => ({ ...prev }));
+                consecutiveEmptySyncsRef.current = 0;
+              }
+            } else {
+              // non-empty payload: reset counter and apply
+              consecutiveEmptySyncsRef.current = 0;
+              setParticipants(payload.pList);
+              setParticipantMediaStates((prev) => ({
+                ...prev,
+                ...payload.mediaStates,
+              }));
+            }
+
+            pendingPresenceSyncPayloadRef.current = null;
+            pendingPresenceSyncTimerRef.current = null;
+          }, _delay);
         })
         .on("presence", { event: "join" }, ({ newPresences }) => {
           if (!isMounted) return;
@@ -696,7 +828,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
 
             setParticipants((prev) => {
               const filtered = prev.filter((existing) => existing.id !== p.id);
-              return [
+              const next = [
                 ...filtered,
                 {
                   presence_ref: p.presence_ref,
@@ -708,6 +840,11 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
                   screenSharing: !!p.screenSharing,
                 },
               ];
+              console.warn(
+                "[presence.join] participants now =>",
+                next.map((x) => x.id),
+              );
+              return next;
             });
 
             setParticipantMediaStates((prev) => ({
@@ -735,9 +872,14 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
             if (p.id === myId.current) return;
             const leftId = p.id;
 
-            setParticipants((prev) =>
-              prev.filter((item) => item.id !== leftId),
-            );
+            setParticipants((prev) => {
+              const next = prev.filter((item) => item.id !== leftId);
+              console.warn(
+                "[presence.leave] participants now =>",
+                next.map((x) => x.id),
+              );
+              return next;
+            });
             cleanupPeer(leftId);
           });
         });
@@ -745,6 +887,17 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
       channel.subscribe(async (subStatus) => {
         if (!isMounted) return;
         if (subStatus === "SUBSCRIBED") {
+          try {
+            console.debug(
+              "[channel.subscribe] SUBSCRIBED, presenceState:",
+              channel.presenceState?.(),
+            );
+          } catch (e) {
+            console.debug(
+              "[channel.subscribe] SUBSCRIBED, presenceState read failed",
+              e,
+            );
+          }
           channelReadyRef.current = true;
           channelRef.current = channel;
           setStatus("온라인");
@@ -777,6 +930,10 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
       stopLocalStream();
       pcsRef.current.forEach((pc) => pc.close());
       if (channelRef.current) supabase.removeChannel(channelRef.current);
+      if (pendingPresenceSyncTimerRef.current) {
+        clearTimeout(pendingPresenceSyncTimerRef.current);
+        pendingPresenceSyncTimerRef.current = null;
+      }
     };
   }, [
     roomId,
