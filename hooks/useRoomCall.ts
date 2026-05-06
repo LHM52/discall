@@ -64,6 +64,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
     mediaStates: Record<string, { cameraOn: boolean; screenSharing: boolean }>;
   } | null>(null);
   const consecutiveEmptySyncsRef = useRef(0);
+  const recentlyRemovedRef = useRef<Record<string, number>>({});
   const pendingBroadcastsRef = useRef<BroadcastMessage[]>([]);
   const pendingPresenceUpdatesRef = useRef<Partial<PresenceTrack>[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -726,6 +727,13 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
 
           for (const key of Object.keys(state)) {
             const presences = state[key] as PresencePayload[];
+            // skip ids that were just removed to avoid immediate re-add from
+            // transient presence.sync states (tombstone behavior)
+            const removedAt = recentlyRemovedRef.current[key];
+            if (removedAt && Date.now() - removedAt < 2000) {
+              // skip this presence for now
+              continue;
+            }
             const currentPresence = pickCurrentPresence(presences);
             const p = currentPresence
               ? toParticipant(currentPresence.id ?? key, currentPresence)
@@ -823,6 +831,11 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
             if (!p) return;
             if (p.id === myId.current) return;
 
+            // clear any recent-removed tombstone when a real join happens
+            if (recentlyRemovedRef.current[p.id]) {
+              delete recentlyRemovedRef.current[p.id];
+            }
+
             setParticipants((prev) => {
               const filtered = prev.filter((existing) => existing.id !== p.id);
               const next = [
@@ -868,6 +881,10 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
             if (!p.id) return;
             if (p.id === myId.current) return;
             const leftId = p.id;
+
+            // mark as recently removed to prevent immediate re-adding from
+            // a subsequent presence.sync transient state
+            recentlyRemovedRef.current[leftId] = Date.now();
 
             setParticipants((prev) => {
               const next = prev.filter((item) => item.id !== leftId);
