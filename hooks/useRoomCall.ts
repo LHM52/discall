@@ -244,7 +244,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
       opts?: { suppressLocalOffer?: boolean },
     ): Promise<RTCPeerConnection | null> => {
       let pc = pcsRef.current.get(remoteId);
-      if (pc && pc.signalingState !== "closed") return pc;
+      if (isPeerConnectionUsable(pc)) return pc as RTCPeerConnection;
 
       const suppressLocalOffer = opts?.suppressLocalOffer ?? false;
 
@@ -297,7 +297,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
         // Guard: ensure this pc is still the active one for remoteId
         if (
           pcsRef.current.get(remoteId) !== pc ||
-          pc.signalingState === "closed"
+          !isPeerConnectionUsable(pc)
         ) {
           throw new Error("Peer connection closed before attaching tracks");
         }
@@ -308,7 +308,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
             if (
               audioTransceiver?.sender &&
               pcsRef.current.get(remoteId) === pc &&
-              pc.signalingState !== "closed"
+              isPeerConnectionUsable(pc)
             ) {
               await audioTransceiver.sender.replaceTrack(audioTrack);
             }
@@ -327,7 +327,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
           if (
             videoTransceiver?.sender &&
             pcsRef.current.get(remoteId) === pc &&
-            pc.signalingState !== "closed"
+            isPeerConnectionUsable(pc)
           ) {
             await videoTransceiver.sender.replaceTrack(videoTrack);
           }
@@ -389,7 +389,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
           await tracksReady;
           if (initialOfferSent) return;
           if (pcsRef.current.get(remoteId) !== pc || !pc) return;
-          if (!pc || pc.signalingState === "closed") return;
+          if (!pc || !isPeerConnectionUsable(pc)) return;
           if (pc.localDescription) return;
           if (makingOfferRef.current[remoteId]) return;
           if (isSettingRemoteDescriptionRef.current[remoteId]) return;
@@ -465,10 +465,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
         );
       };
 
-      if (
-        pcsRef.current.get(remoteId) !== pc ||
-        pc.signalingState === "closed"
-      ) {
+      if (pcsRef.current.get(remoteId) !== pc || !isPeerConnectionUsable(pc)) {
         return null;
       }
 
@@ -576,7 +573,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
               if (ignoreOfferRef.current[from]) return;
 
               isSettingRemoteDescriptionRef.current[from] = true;
-              if (pc.signalingState === "closed") return;
+              if (!isPeerConnectionUsable(pc)) return;
 
               let activePc = pc;
               try {
@@ -609,7 +606,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
                 await Promise.all(
                   candidates.map(async (queuedCandidate) => {
                     try {
-                      if (activePc.signalingState !== "closed") {
+                      if (isPeerConnectionUsable(activePc)) {
                         await activePc.addIceCandidate(queuedCandidate);
                       }
                     } catch (err) {
@@ -648,7 +645,7 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
                 ];
               } else {
                 try {
-                  if (pc.signalingState !== "closed") {
+                  if (isPeerConnectionUsable(pc)) {
                     await pc.addIceCandidate(candidate);
                   }
                 } catch (err) {

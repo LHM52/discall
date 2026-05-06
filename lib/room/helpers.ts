@@ -73,9 +73,8 @@ export function isPeerConnectionUsable(
 ): boolean {
   return Boolean(
     pc &&
-      pc.signalingState !== "closed" &&
-      pc.connectionState !== "closed" &&
-      pc.connectionState !== "failed",
+    pc.connectionState !== "failed" &&
+    pc.connectionState !== "disconnected",
   );
 }
 
