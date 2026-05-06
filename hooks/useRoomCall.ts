@@ -852,11 +852,11 @@ export function useRoomCall({ roomId, nickname, router }: UseRoomCallArgs) {
               },
             }));
 
-            if (
-              isJoinedRef.current &&
-              p.status === "calling" &&
-              !pcsRef.current.has(p.id)
-            ) {
+            if (isJoinedRef.current && !pcsRef.current.has(p.id)) {
+              // If we're in a call, proactively create a peer connection for
+              // rejoined participants even if their presence.status hasn't
+              // flipped to "calling" yet. This reduces a race where UI shows
+              // a participant but media/track negotiation hasn't started.
               void createPeerConnection(p.id);
             }
           });
